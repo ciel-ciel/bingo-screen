@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server"
+import { NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
 
 const supabase = createClient(
@@ -7,16 +7,19 @@ const supabase = createClient(
 )
 
 export async function DELETE(
-  _req: NextRequest,
-  context: { params: Promise<{ id: string }> },
+  _req: Request,
+  { params }: { params: Promise<{ id: string }> },
 ) {
-  const { id } = await context.params
+  const { id } = await params
 
   const { error } = await supabase
     .from("bingo_numbers")
     .delete()
     .eq("id", id)
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
+
   return NextResponse.json({ ok: true })
 }
