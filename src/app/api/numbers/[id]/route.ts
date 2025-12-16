@@ -8,11 +8,14 @@ const supabase = createClient(
 
 export async function DELETE(
   _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
+  context: { params: Promise<{ id: string }> },
 ) {
-  const { id } = await params
+  const { id } = await context.params
 
-  const { error } = await supabase.from("bingo_numbers").delete().eq("id", id)
+  const { error } = await supabase
+    .from("bingo_numbers")
+    .delete()
+    .eq("id", id)
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
   return NextResponse.json({ ok: true })
