@@ -1,117 +1,198 @@
-"use client";
+"use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { supabase } from "../lib/supabase";
+import { useEffect, useMemo, useState } from "react"
+import { useSearchParams } from "next/navigation"
+import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 
-type Draw = {
-  id: number;
-  session_id: string;
-  number: number;
-  created_at: string;
-};
+type BingoDrawRow = {
+  id: number
+  session_id: string
+  number: number
+  created_at: string
+}
 
-const SESSION = process.env.NEXT_PUBLIC_BINGO_SESSION!;
+type InsertPayload<T> = {
+  new: T
+}
+
+const supabaseUrl: string | undefined = process.env.NEXT_PUBLIC_SUPABASE_URL
+const supabaseAnonKey: string | undefined = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+function createSupabaseBrowserClient(): SupabaseClient {
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error("NEXT_PUBLIC_SUPABASE_URL または NEXT_PUBLIC_SUPABASE_ANON_KEY が未設定です。")
+  }
+  return createClient(supabaseUrl, supabaseAnonKey)
+}
 
 export default function DisplayPage() {
-  const [draws, setDraws] = useState<Draw[]>([]);
-  const latest = draws[0]?.number ?? null;
+  const searchParams = useSearchParams()
+  const sessionId: string = searchParams.get("session") || "default"
 
-  const hitSet = useMemo(() => new Set(draws.map(d => d.number)), [draws]);
+  const supabase = useMemo<SupabaseClient>(() => createSupabaseBrowserClient(), [])
 
-  const refresh = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("bingo_draws")
-      .select("*")
-      .eq("session_id", SESSION)
-      .order("created_at", { ascending: false });
-
-    if (!error && data) setDraws(data as Draw[]);
-  }, []);
+  const [latest, setLatest] = useState<BingoDrawRow | null>(null)
+  const [history, setHistory] = useState<BingoDrawRow[]>([])
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    let cancelled = false;
+    let cancelled = false
 
-    const init = async () => {
-      await refresh();
-      if (cancelled) return;
-    };
+    const load = async (): Promise<void> => {
+      try {
+        setError(null)
 
-    init();
+        const { data, error } = await supabase
+          .from("bingo_draws")
+          .select("id,session_id,number,created_at")
+          .eq("session_id", sessionId)
+          .order("created_at", { ascending: false })
+          .limit(76)
 
-    const ch = supabase
-      .channel("bingo_draws_changes_display")
+        if (error) throw error
+        if (cancelled) return
+
+        const rows = (data ?? []) as BingoDrawRow[]
+        setLatest(rows[0] ?? null)
+        setHistory(rows.slice(1))
+      } catch (e: unknown) {
+        if (cancelled) return
+        if (e instanceof Error) {
+          setError(e.message)
+        } else {
+          setError("読み込みに失敗しました。")
+        }
+      }
+    }
+
+    void load()
+
+    const insertChannel = supabase
+      .channel(`bingo_draws_insert_${sessionId}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "bingo_draws" },
-        payload => {
-          const row = payload.new as Draw | null;
-          const oldRow = payload.old as Draw | null;
-          const sid = (row?.session_id ?? oldRow?.session_id) as string | undefined;
-          if (sid !== SESSION) return;
-          refresh();
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "bingo_draws",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        (payload: InsertPayload<BingoDrawRow>) => {
+          const row = payload.new
+
+          setLatest((prevLatest) => {
+            setHistory((prevHistory) => {
+              const nextHistory = prevLatest ? [prevLatest, ...prevHistory] : [...prevHistory]
+              return nextHistory.slice(0, 75)
+            })
+            return row
+          })
         }
       )
-      .subscribe();
+      .subscribe()
+
+    const deleteChannel = supabase
+      .channel(`bingo_draws_delete_${sessionId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "DELETE",
+          schema: "public",
+          table: "bingo_draws",
+          filter: `session_id=eq.${sessionId}`,
+        },
+        () => {
+          void load()
+        }
+      )
+      .subscribe()
 
     return () => {
-      cancelled = true;
-      supabase.removeChannel(ch);
-    };
-  }, [refresh]);
+      cancelled = true
+      supabase.removeChannel(insertChannel)
+      supabase.removeChannel(deleteChannel)
+    }
+  }, [supabase, sessionId])
 
   return (
-    <div style={{ minHeight: "100vh", padding: 24, display: "grid", gap: 24 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, alignItems: "stretch" }}>
-        <div style={{ border: "1px solid #ddd", borderRadius: 16, padding: 24 }}>
-          <div style={{ fontSize: 20, opacity: 0.7 }}>最新</div>
-          <div style={{ fontSize: 180, lineHeight: 1, fontWeight: 700 }}>
-            {latest ?? "ー"}
-          </div>
-        </div>
+    <main style={{ minHeight: "100vh", padding: 24, display: "grid", placeItems: "center" }}>
+      <div style={{ width: "100%", maxWidth: 980, display: "grid", gap: 16 }}>
+        <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <h1 style={{ margin: 0, fontSize: 28 }}>Display</h1>
+          <div style={{ opacity: 0.7, fontSize: 14 }}>session。{sessionId}</div>
+        </header>
 
-        <div style={{ border: "1px solid #ddd", borderRadius: 16, padding: 24 }}>
-          <div style={{ fontSize: 20, opacity: 0.7 }}>履歴。新しい順</div>
-          <div style={{ fontSize: 28, display: "flex", flexWrap: "wrap", gap: 12, marginTop: 12 }}>
-            {draws.slice(0, 30).map(d => (
-              <span
-                key={d.id}
-                style={{
-                  border: "1px solid #ddd",
-                  borderRadius: 999,
-                  padding: "6px 14px"
-                }}
-              >
-                {d.number}
-              </span>
-            ))}
+        {error ? (
+          <div
+            style={{
+              border: "1px solid rgba(0,0,0,0.15)",
+              borderRadius: 16,
+              padding: 16,
+              background: "rgba(255,0,0,0.04)",
+            }}
+          >
+            {error}
           </div>
-        </div>
-      </div>
+        ) : null}
 
-      <div style={{ border: "1px solid #ddd", borderRadius: 16, padding: 24 }}>
-        <div style={{ fontSize: 20, opacity: 0.7 }}>1から75</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(15, 1fr)", gap: 8, marginTop: 12 }}>
-          {Array.from({ length: 75 }, (_, i) => i + 1).map(n => {
-            const hit = hitSet.has(n);
-            return (
-              <div
-                key={n}
-                style={{
-                  border: "1px solid #ddd",
-                  borderRadius: 10,
-                  padding: "10px 0",
-                  textAlign: "center",
-                  fontSize: 18,
-                  opacity: hit ? 1 : 0.25,
-                  fontWeight: hit ? 700 : 400
-                }}
-              >
-                {n}
-              </div>
-            );
-          })}
-        </div>
+        <section
+          style={{
+            border: "1px solid rgba(0,0,0,0.12)",
+            borderRadius: 20,
+            padding: 20,
+          }}
+        >
+          <div style={{ opacity: 0.7, fontSize: 14, marginBottom: 10 }}>最新の数字</div>
+          <div
+            style={{
+              fontSize: 96,
+              lineHeight: 1,
+              fontWeight: 700,
+              letterSpacing: -2,
+              textAlign: "center",
+              padding: "12px 0",
+            }}
+          >
+            {latest ? latest.number : "－"}
+          </div>
+          <div style={{ opacity: 0.6, fontSize: 12, textAlign: "center" }}>
+            {latest ? new Date(latest.created_at).toLocaleString("ja-JP") : ""}
+          </div>
+        </section>
+
+        <section
+          style={{
+            border: "1px solid rgba(0,0,0,0.12)",
+            borderRadius: 20,
+            padding: 20,
+          }}
+        >
+          <div style={{ opacity: 0.7, fontSize: 14, marginBottom: 10 }}>過去の数字</div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            {history.length === 0 ? (
+              <div style={{ opacity: 0.6 }}>まだ履歴がありません。</div>
+            ) : (
+              history.map((r) => (
+                <div
+                  key={r.id}
+                  style={{
+                    minWidth: 64,
+                    padding: "10px 12px",
+                    borderRadius: 14,
+                    border: "1px solid rgba(0,0,0,0.12)",
+                    fontSize: 24,
+                    fontWeight: 600,
+                    textAlign: "center",
+                  }}
+                >
+                  {r.number}
+                </div>
+              ))
+            )}
+          </div>
+        </section>
       </div>
-    </div>
-  );
+    </main>
+  )
 }
